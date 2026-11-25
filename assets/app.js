@@ -3,91 +3,110 @@
 
   /* ============================================================
      STATE — saved in this browser (localStorage), survives refresh
+     c: food ticks · s: set ticks · kg: weight used · d: dinner A/B
+     ci: daily check-in · days: frozen daily snapshot (for history)
+     mo: month-end measurements · shop: shopping ticks · ui: prefs
      ============================================================ */
   const KEY = 'hostelFitPlan:v2';
-  const blank = () => ({ c: {}, s: {}, kg: {}, d: {}, ci: {}, shop: {}, ui: {} });
-  let S = load();
+  const SECTIONS = ['c', 's', 'kg', 'd', 'ci', 'days', 'mo', 'shop', 'ui'];
+  const blank = () => ({ c: {}, s: {}, kg: {}, d: {}, ci: {}, days: {}, mo: {}, shop: {}, ui: {} });
   let storageOK = true;
+  let persisted = null;
+  let S = load();
 
   function load() {
-    try { return Object.assign(blank(), JSON.parse(localStorage.getItem(KEY)) || {}); }
-    catch (e) { return blank(); }
+    try {
+      const raw = JSON.parse(localStorage.getItem(KEY)) || {};
+      const out = blank();
+      for (const k of SECTIONS) if (isObj(raw[k])) out[k] = raw[k];
+      return out;
+    } catch (e) { return blank(); }
   }
   function save() {
     try { localStorage.setItem(KEY, JSON.stringify(S)); storageOK = true; }
     catch (e) { storageOK = false; }
   }
 
-  /* ---------- backup file: only files exported by this site are accepted ---------- */
-  const BACKUP_APP = 'hostel-fit-plan';
-  const BACKUP_VER = 2;
-  const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
-  const KEY_RE = /^[\w|:.-]{1,80}$/;
-  const num = (v) => (typeof v === 'number' || (typeof v === 'string' && v.trim() !== '')) && isFinite(v) && +v >= 0 && +v < 100000;
-
-  // Returns a clean state, or throws with a human-readable reason.
-  function readBackup(txt) {
-    let file;
-    try { file = JSON.parse(txt); } catch (e) { throw new Error('This is not a JSON file.'); }
-    if (!isObj(file) || file.app !== BACKUP_APP) throw new Error('This file was not exported from Hostel Fit Plan.');
-    if (file.version !== BACKUP_VER) throw new Error(`This backup is from a different version of the site (v${String(file.version)}).`);
-    const src = file.data;
-    if (!isObj(src)) throw new Error('The backup file is damaged (no data inside).');
-    for (const k of ['c', 's', 'kg', 'd', 'ci', 'shop', 'ui']) {
-      if (src[k] !== undefined && !isObj(src[k])) throw new Error(`The backup file is damaged (bad "${k}" section).`);
+  // Ask the browser not to auto-clear this site's storage (long-term records).
+  try {
+    if (navigator.storage && navigator.storage.persisted) {
+      navigator.storage.persisted().then((p) => {
+        persisted = p;
+        if (!p && navigator.storage.persist) return navigator.storage.persist().then((r) => { persisted = r; });
+      }).catch(() => {});
     }
-    const out = blank();
-    const ticks = (from, to) => { for (const [k, v] of Object.entries(from || {})) if (KEY_RE.test(k) && v) to[k] = 1; };
-    ticks(src.c, out.c); ticks(src.s, out.s); ticks(src.shop, out.shop);
-    for (const [k, v] of Object.entries(src.kg || {})) if (KEY_RE.test(k) && num(v)) out.kg[k] = String(+v);
-    for (const [k, v] of Object.entries(src.d || {})) if (dayById(k) && (v === 'A' || v === 'B')) out.d[k] = v;
-    for (const [k, v] of Object.entries(src.ci || {})) {
-      if (!dayById(k) || !isObj(v)) continue;
-      const row = {};
-      for (const f of ['weight', 'waist', 'steps', 'sleep', 'water']) if (num(v[f])) row[f] = +v[f];
-      out.ci[k] = row;
-    }
-    const ui = src.ui || {};
-    if (ui.sub === 'food' || ui.sub === 'workout') out.ui.sub = ui.sub;
-    if (ui.seenHow) out.ui.seenHow = 1;
-    if (ui.wantWake) out.ui.wantWake = true;
-    return { state: out, exported: typeof file.exported === 'string' ? file.exported : '' };
-  }
-
-  function importBackup(f) {
-    if (!/\.json$/i.test(f.name)) { alert('Please choose the .json backup file exported from this site.'); return; }
-    if (f.size > 1024 * 1024) { alert('That file is too big to be a Hostel Fit Plan backup.'); return; }
-    f.text().then((txt) => {
-      let b;
-      try { b = readBackup(txt); } catch (err) { alert('Import cancelled: ' + err.message); return; }
-      const when = b.exported ? new Date(b.exported) : null;
-      const label = when && !isNaN(when) ? when.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : 'unknown date';
-      const n = Object.keys(b.state.c).length + Object.keys(b.state.s).length;
-      if (!confirm(`Restore backup from ${label}?\n(${n} ticks, ${Object.keys(b.state.ci).length} check-in days)\n\nThis replaces everything currently saved on this phone.`)) return;
-      S = b.state; save(); route(); alert('Backup restored.');
-    }).catch(() => alert('Could not read that file. Try choosing it again.'));
-  }
+  } catch (e) { /* ignore */ }
 
   /* ============================================================
      HELPERS
      ============================================================ */
+  function isObj(v) { return v !== null && typeof v === 'object' && !Array.isArray(v); }
   const $ = (sel, el = document) => el.querySelector(sel);
   const $$ = (sel, el = document) => Array.from(el.querySelectorAll(sel));
   const app = $('#app');
   const fmt = (n) => Math.round(n).toLocaleString('en-IN');
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const pct = (a, b) => (b ? Math.min(100, Math.round((a / b) * 100)) : 0);
-  const dayById = (id) => DAYS.find((d) => d.id === id);
+  const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
+  const r1 = (v) => (v == null ? null : Math.round(v * 10) / 10);
+  const sign = (v) => (v > 0 ? '+' : v < 0 ? '−' : '±') + Math.abs(v).toFixed(1);
+  const dash = (v, f = (x) => x) => (v == null || v === '' ? '–' : f(v));
+
+  /* ---------------- dates ---------------- */
+  const DOW = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+  const DOW_NAME = { sun: 'Sun', mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat' };
+  const WEEK_ORDER = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+  const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const MONTH = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
   function localISO(d = new Date()) {
     const z = (n) => String(n).padStart(2, '0');
     return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}`;
   }
-  const TODAY = localISO();
-  function defaultDay() {
-    if (dayById(TODAY)) return TODAY;
-    return TODAY < DAYS[0].id ? DAYS[0].id : DAYS[DAYS.length - 1].id;
+  function parseISO(id) { const [y, m, d] = id.split('-').map(Number); return new Date(y, m - 1, d, 12); }
+  const isDate = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && localISO(parseISO(s)) === s;
+  const isMonth = (s) => typeof s === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(s);
+  function addDays(id, n) { const d = parseISO(id); d.setDate(d.getDate() + n); return localISO(d); }
+  const dayDiff = (a, b) => Math.round((parseISO(b) - parseISO(a)) / 864e5);
+  const monthOf = (id) => id.slice(0, 7);
+  const dowOf = (id) => DOW[parseISO(id).getDay()];
+  const niceDate = (id) => `${+id.slice(8)} ${MON[+id.slice(5, 7) - 1]}`;
+  const longDate = (id) => `${DOW_NAME[dowOf(id)]} ${niceDate(id)}`;
+  const monthLabel = (ym) => `${MONTH[+ym.slice(5) - 1]} ${ym.slice(0, 4)}`;
+  const weekStart = (id) => addDays(id, -((parseISO(id).getDay() + 6) % 7));
+  function nextMonth(ym) { let [y, m] = ym.split('-').map(Number); m++; if (m > 12) { m = 1; y++; } return `${y}-${String(m).padStart(2, '0')}`; }
+  const lastOfMonth = (ym) => addDays(nextMonth(ym) + '-01', -1);
+  function rangeLabel(a, b) {
+    const ma = MON[+a.slice(5, 7) - 1], mb = MON[+b.slice(5, 7) - 1];
+    return ma === mb ? `${+a.slice(8)} – ${+b.slice(8)} ${mb}` : `${+a.slice(8)} ${ma} – ${+b.slice(8)} ${mb}`;
   }
+
+  const TODAY = localISO();
+
+  /* ---------------- plans ---------------- */
+  const PL = PLANS.slice().sort((a, b) => (a.from < b.from ? -1 : 1));
+  const START = PL[0].from;
+  const MAX = addDays(TODAY > START ? TODAY : START, 42);
+  const REST = {
+    type: 'recovery', title: 'Rest day', sub: 'Nothing planned for this day', note: '', meals: [],
+    workout: { title: 'Rest', time: '', where: '', mins: 0, blocks: [] },
+  };
+
+  function planFor(id) {
+    for (let i = PL.length - 1; i >= 0; i--) if (PL[i].from <= id) return PL[i];
+    return null;
+  }
+  const dayCache = new Map();
+  function dayFor(id) {
+    if (!isDate(id) || id < START || id > MAX) return null;
+    if (dayCache.has(id)) return dayCache.get(id);
+    const plan = planFor(id), dow = dowOf(id);
+    const tpl = plan.days.find((d) => d.dow === dow) || REST;
+    const day = Object.assign({}, tpl, { id, dow, dowName: DOW_NAME[dow], date: niceDate(id), plan });
+    dayCache.set(id, day);
+    return day;
+  }
+  const currentPlan = () => planFor(TODAY >= START ? TODAY : START);
 
   const I = {
     food: '<svg viewBox="0 0 24 24"><path d="M3 11h18a9 9 0 0 1-18 0Z"/><path d="M7 7c0-1.5 1-1.5 1-3M12 7c0-1.5 1-1.5 1-3M17 7c0-1.5 1-1.5 1-3"/></svg>',
@@ -100,6 +119,7 @@
     moon: '<svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5Z"/></svg>',
     arrow: '<svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
     bolt: '<svg viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7Z"/></svg>',
+    flag: '<svg viewBox="0 0 24 24"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg>',
     noimg: '<svg viewBox="0 0 24 24"><path d="M6 7v10M3 9.5v5M18 7v10M21 9.5v5M6 12h12"/></svg>',
   };
 
@@ -129,21 +149,268 @@
     return { total, done };
   }
 
+  // Most recent earlier date on which this exercise had a weight logged.
   function lastKg(day, x) {
-    const i = DAYS.indexOf(day);
-    for (let j = i - 1; j >= 0; j--) {
-      const v = S.kg[kgKey(DAYS[j], x)];
-      if (v) return { v, d: DAYS[j] };
+    let best = null;
+    for (const [k, v] of Object.entries(S.kg)) {
+      const [d, ex] = k.split('|');
+      if (ex === x && d < day.id && v !== '' && (!best || d > best.d)) best = { d, v };
     }
+    return best;
+  }
+
+  /* ---------------- daily snapshot (frozen history) ----------------
+     Saved every time something changes on a day, so later plan edits
+     never rewrite what you actually ate and trained. */
+  function snap(id) {
+    const day = dayFor(id); if (!day) return;
+    const f = foodTotals(day), w = workoutTotals(day);
+    if (!f.done && !w.done) { delete S.days[id]; return; }
+    const meals = {};
+    day.meals.forEach((m) => {
+      const its = mealItems(day, m);
+      meals[m.id] = [its.filter((_, i) => S.c[itemKey(day, m, i)]).length, its.length];
+    });
+    const rec = {
+      plan: day.plan.id, type: day.type, wo: day.workout.title,
+      kcal: [f.ek, f.pk], prot: [f.ep, f.pp], items: [f.done, f.n], sets: [w.done, w.total], meals,
+    };
+    if (day.meals.some((m) => m.dinner)) rec.dinner = dinnerChoice(day);
+    S.days[id] = rec;
+  }
+  function ensureSnaps() {
+    const ids = new Set();
+    for (const k of Object.keys(S.c).concat(Object.keys(S.s))) ids.add(k.split('|')[0]);
+    let changed = false;
+    ids.forEach((id) => { if (!S.days[id] && dayFor(id)) { snap(id); changed = true; } });
+    if (changed) save();
+  }
+
+  /* ============================================================
+     BACKUP FILE — only files exported by this site are accepted
+     ============================================================ */
+  const BACKUP_APP = 'hostel-fit-plan';
+  const BACKUP_VER = 3;
+  const BACKUP_OK = [2, 3];
+  const KEY_RE = /^[\w|:.-]{1,80}$/;
+  const num = (v) => (typeof v === 'number' || (typeof v === 'string' && v.trim() !== '')) && isFinite(v) && +v >= 0 && +v < 100000;
+  const str = (v, max) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
+  const pair = (v) => Array.isArray(v) && v.length === 2 && num(v[0]) && num(v[1]);
+  const CI_NUM = ['weight', 'waist', 'steps', 'sleep', 'water', 'energy', 'hunger'];
+  const CI_TXT = { off: 200, note: 300 };
+  const MO_NUM = ['hips', 'chest', 'arm', 'thigh'];
+
+  // Returns a clean state, or throws with a human-readable reason.
+  function readBackup(txt) {
+    let file;
+    try { file = JSON.parse(txt); } catch (e) { throw new Error('This is not a JSON file.'); }
+    if (!isObj(file) || file.app !== BACKUP_APP) throw new Error('This file was not exported from Hostel Fit Plan.');
+    if (!BACKUP_OK.includes(file.version)) throw new Error(`This backup is from a different version of the site (v${String(file.version)}).`);
+    const src = file.data;
+    if (!isObj(src)) throw new Error('The backup file is damaged (no data inside).');
+    for (const k of SECTIONS) {
+      if (src[k] !== undefined && !isObj(src[k])) throw new Error(`The backup file is damaged (bad "${k}" section).`);
+    }
+    const out = blank();
+    const ticks = (from, to) => { for (const [k, v] of Object.entries(from || {})) if (KEY_RE.test(k) && v) to[k] = 1; };
+    ticks(src.c, out.c); ticks(src.s, out.s); ticks(src.shop, out.shop);
+    for (const [k, v] of Object.entries(src.kg || {})) if (KEY_RE.test(k) && num(v)) out.kg[k] = String(+v);
+    for (const [k, v] of Object.entries(src.d || {})) if (isDate(k) && (v === 'A' || v === 'B')) out.d[k] = v;
+    for (const [k, v] of Object.entries(src.ci || {})) {
+      if (!isDate(k) || !isObj(v)) continue;
+      const row = {};
+      for (const f of CI_NUM) if (num(v[f])) row[f] = +v[f];
+      for (const [f, max] of Object.entries(CI_TXT)) { const s = str(v[f], max); if (s) row[f] = s; }
+      out.ci[k] = row;
+    }
+    for (const [k, v] of Object.entries(src.days || {})) {
+      if (!isDate(k) || !isObj(v)) continue;
+      const o = {};
+      for (const f of ['plan', 'type', 'wo']) { const s = str(v[f], 40); if (s) o[f] = s; }
+      if (v.dinner === 'A' || v.dinner === 'B') o.dinner = v.dinner;
+      for (const f of ['kcal', 'prot', 'items', 'sets']) if (pair(v[f])) o[f] = [+v[f][0], +v[f][1]];
+      if (isObj(v.meals)) {
+        o.meals = {};
+        for (const [mk, mv] of Object.entries(v.meals)) if (/^\w{1,3}$/.test(mk) && pair(mv)) o.meals[mk] = [+mv[0], +mv[1]];
+      }
+      out.days[k] = o;
+    }
+    for (const [k, v] of Object.entries(src.mo || {})) {
+      if (!isMonth(k) || !isObj(v)) continue;
+      const o = {};
+      for (const f of MO_NUM) if (num(v[f])) o[f] = +v[f];
+      if (v.photos) o.photos = 1;
+      const s = str(v.feel, 1000); if (s) o.feel = s;
+      out.mo[k] = o;
+    }
+    const ui = src.ui || {};
+    if (ui.sub === 'food' || ui.sub === 'workout') out.ui.sub = ui.sub;
+    if (ui.seenHow) out.ui.seenHow = 1;
+    if (ui.wantWake) out.ui.wantWake = true;
+    if (isDate(ui.lastExport)) out.ui.lastExport = ui.lastExport;
+    if (isMonth(ui.pm)) out.ui.pm = ui.pm;
+    return { state: out, exported: typeof file.exported === 'string' ? file.exported : '' };
+  }
+
+  function importBackup(f) {
+    if (!/\.json$/i.test(f.name)) { alert('Please choose the .json backup file exported from this site.'); return; }
+    if (f.size > 5 * 1024 * 1024) { alert('That file is too big to be a Hostel Fit Plan backup.'); return; }
+    f.text().then((txt) => {
+      let b;
+      try { b = readBackup(txt); } catch (err) { alert('Import cancelled: ' + err.message); return; }
+      const when = b.exported ? new Date(b.exported) : null;
+      const label = when && !isNaN(when) ? when.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : 'unknown date';
+      const n = Object.keys(b.state.c).length + Object.keys(b.state.s).length;
+      if (!confirm(`Restore backup from ${label}?\n(${n} ticks, ${Object.keys(b.state.ci).length} check-in days)\n\nThis replaces everything currently saved on this phone.`)) return;
+      S = b.state; ensureSnaps(); save(); route(); alert('Backup restored.');
+    }).catch(() => alert('Could not read that file. Try choosing it again.'));
+  }
+
+  /* ---------------- export: raw data + a readable review summary ---------------- */
+  function buildExport() {
+    const days = allDates().map((id) => {
+      const ci = S.ci[id] || {}, sn = S.days[id] || {}, d = dayFor(id);
+      return {
+        date: id, dow: DOW_NAME[dowOf(id)],
+        plan: sn.plan || (d && d.plan.id), type: sn.type || (d && d.type), workout: sn.wo || (d && d.workout.title),
+        weightKg: ci.weight, waistCm: ci.waist, steps: ci.steps, sleepH: ci.sleep,
+        waterL: ci.water != null ? ci.water * 0.25 : undefined,
+        energy1to5: ci.energy, hunger1to5: ci.hunger, offPlanFood: ci.off, note: ci.note,
+        kcalEaten: sn.kcal && sn.kcal[0], kcalPlanned: sn.kcal && sn.kcal[1],
+        proteinEaten: sn.prot && sn.prot[0], proteinPlanned: sn.prot && sn.prot[1],
+        foodItemsTicked: sn.items, setsDone: sn.sets, dinnerOption: sn.dinner, mealsTicked: sn.meals,
+      };
+    });
+    const weeks = weekRows();
+    return {
+      app: BACKUP_APP, version: BACKUP_VER, exported: new Date().toISOString(),
+      about: 'Hostel Fit Plan export. "review" is a readable summary for the month-end review. "data" is what the Import button restores.',
+      profile: PROFILE, targets: TARGETS,
+      plans: PL.map((p) => ({ id: p.id, from: p.from, label: p.label })),
+      review: {
+        firstWeighIn: firstWeight(), currentWeight7dAvg: currentWeight(),
+        adjustRule: verdict(weeks).text,
+        weeks, months: monthRows(),
+        strength: strengthRows().map((r) => ({ exercise: r.name, key: r.x, log: r.log })),
+        monthEnd: S.mo, days,
+      },
+      data: S,
+    };
+  }
+  function doExport() {
+    S.ui.lastExport = TODAY; save();
+    const blob = new Blob([JSON.stringify(buildExport(), null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = `fit-plan-backup-${TODAY}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  /* ============================================================
+     HISTORY MATHS (weeks, months, strength, adjust rule)
+     ============================================================ */
+  function allDates() {
+    const set = new Set(Object.keys(S.ci).concat(Object.keys(S.days)));
+    return [...set].filter((id) => isDate(id) && (Object.keys(S.ci[id] || {}).length || S.days[id])).sort();
+  }
+  function weighIns() {
+    return Object.keys(S.ci).filter((id) => isDate(id) && S.ci[id].weight).sort().map((id) => ({ id, v: +S.ci[id].weight }));
+  }
+  const firstWeight = () => { const w = weighIns(); return w.length ? w[0].v : null; };
+  function avgWeightAround(id) { // trailing 7-day average ending on id
+    const from = addDays(id, -6);
+    return avg(weighIns().filter((p) => p.id >= from && p.id <= id).map((p) => p.v));
+  }
+  const currentWeight = () => { const w = weighIns(); return w.length ? r1(avgWeightAround(w[w.length - 1].id)) : null; };
+
+  function summarize(ids) {
+    const ci = ids.map((id) => S.ci[id] || {}), sn = ids.map((id) => S.days[id]).filter(Boolean);
+    const vals = (f) => ci.map((c) => c[f]).filter((v) => v != null && v !== '').map(Number);
+    const W = vals('weight'), WA = vals('waist');
+    const fed = sn.filter((d) => d.kcal && d.kcal[0] > 0);
+    return {
+      weightAvg: r1(avg(W)), weighIns: W.length,
+      waist: WA.length ? WA[WA.length - 1] : null,
+      kcalAvg: fed.length ? Math.round(avg(fed.map((d) => d.kcal[0]))) : null,
+      proteinAvg: fed.length ? Math.round(avg(fed.map((d) => d.prot[0]))) : null,
+      foodDays: fed.length,
+      workouts: sn.filter((d) => d.sets && d.sets[1] && d.sets[0] / d.sets[1] >= 0.8).length,
+      stepsAvg: vals('steps').length ? Math.round(avg(vals('steps'))) : null,
+      sleepAvg: r1(avg(vals('sleep'))),
+      waterAvgL: vals('water').length ? r1(avg(vals('water')) * 0.25) : null,
+      energyAvg: r1(avg(vals('energy'))), hungerAvg: r1(avg(vals('hunger'))),
+      offPlanDays: ci.filter((c) => c.off).length,
+    };
+  }
+  function weekRows() {
+    const groups = new Map();
+    allDates().forEach((id) => { const w = weekStart(id); if (!groups.has(w)) groups.set(w, []); groups.get(w).push(id); });
+    const rows = [...groups.keys()].sort().map((w) => Object.assign({ from: w, to: addDays(w, 6) }, summarize(groups.get(w))));
+    rows.forEach((r, i) => {
+      const p = rows[i - 1];
+      r.change = p && r.weightAvg != null && p.weightAvg != null && dayDiff(p.from, r.from) === 7 ? r1(r.weightAvg - p.weightAvg) : null;
+    });
+    return rows;
+  }
+  function monthRows() {
+    const groups = new Map();
+    allDates().forEach((id) => { const m = monthOf(id); if (!groups.has(m)) groups.set(m, []); groups.get(m).push(id); });
+    return [...groups.keys()].sort().map((m) => {
+      const ids = groups.get(m);
+      const W = ids.filter((id) => S.ci[id] && S.ci[id].weight).map((id) => +S.ci[id].weight);
+      const WA = ids.filter((id) => S.ci[id] && S.ci[id].waist).map((id) => +S.ci[id].waist);
+      const start = W.length ? r1(avg(W.slice(0, 3))) : null, end = W.length ? r1(avg(W.slice(-3))) : null;
+      return Object.assign({ month: m, daysLogged: ids.length, weightStart: start, weightEnd: end,
+        weightChange: W.length >= 4 ? r1(end - start) : null,
+        waistChange: WA.length >= 2 ? r1(WA[WA.length - 1] - WA[0]) : null }, summarize(ids), { measurements: S.mo[m] || null });
+    });
+  }
+  function strengthRows() {
+    const by = {};
+    for (const [k, v] of Object.entries(S.kg)) {
+      const [d, x] = k.split('|');
+      if (!isDate(d) || !EX[x] || v === '') continue;
+      (by[x] = by[x] || []).push([d, +v]);
+    }
+    return Object.entries(by).map(([x, log]) => ({ x, name: EX[x].name, log: log.sort((a, b) => (a[0] < b[0] ? -1 : 1)) }))
+      .sort((a, b) => b.log.length - a.log.length || (a.name < b.name ? -1 : 1));
+  }
+
+  // The weekly adjust rule from the Guide, applied automatically.
+  function verdict(weeks) {
+    const full = weeks.filter((w) => w.to < TODAY && w.weighIns >= 3);
+    if (full.length < 2) {
+      return { tone: 'info', text: 'Needs two finished weeks with at least 3 morning weigh-ins each. Weigh yourself every morning and this fills in automatically.' };
+    }
+    const [a, b] = full.slice(-2);
+    const rate = b.weightAvg - a.weightAvg, rs = `${sign(rate)} kg/week`;
+    const early = a.from <= weekStart(START);
+    if (rate <= -1.2 && !early) return { tone: 'warn', text: `Losing fast (${rs}). Add 1 chapati at lunch. If you feel weak or dizzy, do it today.`, rate };
+    if (rate <= -0.5) return { tone: 'good', text: `On track (${rs}). Change nothing.`, rate };
+    if (rate <= -0.3) return { tone: 'ok', text: `A bit slow (${rs}) but fine. Keep going and check again next Monday.`, rate };
+    if (full.length >= 3) {
+      const prev = a.weightAvg - full[full.length - 3].weightAvg;
+      if (prev > -0.3) return { tone: 'act', text: `Stalled two weeks in a row (${rs}). Use Dinner B (Hostel kit) on 3 more nights a week and add 2,000 steps a day.`, rate };
+    }
+    return { tone: 'ok', text: `Slow week (${rs}). One slow week is normal (water, salt). If next week is slow too, the rule will tell you what to change.`, rate };
+  }
+
+  /* ---------------- month-end review timing ---------------- */
+  function reviewDue() {
+    const m = monthOf(TODAY), end = lastOfMonth(m);
+    if (TODAY === end) return { month: m, done: S.ui.lastExport === TODAY };
+    const prevEnd = addDays(m + '-01', -1);
+    if (+TODAY.slice(8) <= 3 && prevEnd >= START && !(S.ui.lastExport && S.ui.lastExport >= prevEnd)) return { month: monthOf(prevEnd), late: true };
     return null;
   }
 
   /* ============================================================
      ROUTER
      ============================================================ */
+  function defaultDay() { return dayFor(TODAY) ? TODAY : START; }
   function parse() {
     const p = location.hash.replace(/^#\/?/, '').split('/');
-    if (dayById(p[0])) return { view: 'day', id: p[0], sub: p[1] === 'workout' || p[1] === 'food' ? p[1] : S.ui.sub || 'food' };
+    if (dayFor(p[0])) return { view: 'day', id: p[0], sub: p[1] === 'workout' || p[1] === 'food' ? p[1] : S.ui.sub || 'food' };
     if (['shop', 'guide', 'progress'].includes(p[0])) return { view: p[0] };
     return { view: 'day', id: defaultDay(), sub: S.ui.sub || 'food' };
   }
@@ -151,7 +418,7 @@
   function route() {
     const r = parse();
     $$('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.tab === (r.view === 'day' ? 'plan' : r.view)));
-    if (r.view === 'day') { S.ui.sub = r.sub; save(); renderDay(dayById(r.id), r.sub); }
+    if (r.view === 'day') { S.ui.sub = r.sub; save(); renderDay(dayFor(r.id), r.sub); }
     else if (r.view === 'shop') renderShop();
     else if (r.view === 'guide') renderGuide();
     else renderProgress();
@@ -169,15 +436,16 @@
     const f = foodTotals(day);
     const isRec = day.type === 'recovery';
     app.innerHTML = `
-      ${dayStrip(day)}
+      ${banners(day)}
+      ${weekStrip(day, sub)}
       <section class="hero t-${day.type}">
         <div class="hero-meta">
           <span class="pill">${TYPE[day.type]}</span>
-          <span>${day.dow}, ${day.date}${day.id === TODAY ? ' · <b class="today-tag">Today</b>' : ''}</span>
+          <span>${day.dowName}, ${day.date}${day.id === TODAY ? ' · <b class="today-tag">Today</b>' : ''}</span>
         </div>
         <h1>${esc(day.title)}</h1>
         <p class="hero-sub">${esc(day.sub)}</p>
-        <p class="hero-note">${esc(day.note)}</p>
+        ${day.note ? `<p class="hero-note">${esc(day.note)}</p>` : ''}
       </section>
 
       <div class="subtabs" role="tablist">
@@ -185,7 +453,7 @@
           ${I.food}<span>Food<small>${fmt(f.pk)} kcal · ${f.pp} g protein</small></span>
         </a>
         <a role="tab" href="#/${day.id}/workout" class="${sub === 'workout' ? 'on' : ''}" aria-selected="${sub === 'workout'}">
-          ${isRec ? I.walk : I.gym}<span>${isRec ? 'Activity' : 'Workout'}<small>${day.workout.mins} min · ${esc(day.workout.where)}</small></span>
+          ${isRec ? I.walk : I.gym}<span>${isRec ? 'Activity' : 'Workout'}<small>${day.workout.mins} min${day.workout.where ? ' · ' + esc(day.workout.where) : ''}</small></span>
         </a>
       </div>
 
@@ -193,21 +461,54 @@
       ${dayNav(day, sub)}`;
   }
 
-  function dayStrip(active) {
-    return `<nav class="daystrip" aria-label="Choose day">${DAYS.map((d) => {
-      const f = foodTotals(d), w = workoutTotals(d);
-      const p = pct(f.done + w.done, f.n + w.total);
-      return `<a href="#/${d.id}" class="daychip ${d.id === active.id ? 'active' : ''} ${d.id === TODAY ? 'is-today' : ''}" aria-label="${d.dow} ${d.date}, ${p}% done">
-        <span class="dc-dow">${d.dow}</span><span class="dc-date">${d.date.split(' ')[0]}</span>
+  function banners(day) {
+    let out = '';
+    const due = reviewDue();
+    if (due && !due.done) {
+      out += `<section class="banner">
+        <div>${I.flag}</div>
+        <div><b>${due.late ? `${monthLabel(due.month)} review is pending` : 'Today is month-end review day'}</b>
+          <p>Fill in the month-end measurements, export your file, and send it to Claude along with next month’s mess menu.</p>
+          <a class="btn" href="#progress">Open month-end review</a></div>
+      </section>`;
+    }
+    if (monthOf(day.id) > day.plan.id) {
+      out += `<section class="banner soft"><div>${I.food}</div><div><b>Still using the ${esc(day.plan.label)} meals</b>
+        <p>The mess menu has probably changed. Send the new menu to Claude to update the meals. Workouts stay the same.</p></div></section>`;
+    }
+    return out;
+  }
+
+  function weekStrip(active, sub) {
+    const mon = weekStart(active.id);
+    const ids = Array.from({ length: 7 }, (_, i) => addDays(mon, i));
+    const prevW = addDays(active.id, -7), nextW = addDays(active.id, 7);
+    const prevTarget = dayFor(prevW) ? prevW : (mon > START ? START : null);
+    const nextTarget = dayFor(nextW) ? nextW : null;
+    const chips = ids.map((id) => {
+      const d = dayFor(id);
+      if (!d) return `<span class="daychip off"><span class="dc-dow">${DOW_NAME[dowOf(id)]}</span><span class="dc-date">${+id.slice(8)}</span><span class="dc-bar"></span></span>`;
+      const sn = S.days[id];
+      const p = sn ? pct((sn.items ? sn.items[0] : 0) + (sn.sets ? sn.sets[0] : 0), (sn.items ? sn.items[1] : 0) + (sn.sets ? sn.sets[1] : 0)) : 0;
+      return `<a href="#/${id}/${sub}" class="daychip ${id === active.id ? 'active' : ''} ${id === TODAY ? 'is-today' : ''}" aria-label="${d.dowName} ${d.date}, ${p}% done">
+        <span class="dc-dow">${d.dowName}</span><span class="dc-date">${+id.slice(8)}</span>
         <span class="dc-bar"><i style="width:${p}%"></i></span></a>`;
-    }).join('')}</nav>`;
+    }).join('');
+    return `<div class="week">
+      <div class="weekbar">
+        ${prevTarget ? `<a href="#/${prevTarget}/${sub}" aria-label="Previous week">‹</a>` : '<span class="wb-gap"></span>'}
+        <span class="wb-label">${rangeLabel(ids[0], ids[6])}${active.id !== TODAY && dayFor(TODAY) ? ` · <a href="#/${TODAY}/${sub}">Today</a>` : ''}</span>
+        ${nextTarget ? `<a href="#/${nextTarget}/${sub}" aria-label="Next week">›</a>` : '<span class="wb-gap"></span>'}
+      </div>
+      <nav class="daystrip" aria-label="Choose day">${chips}</nav>
+    </div>`;
   }
 
   function dayNav(day, sub) {
-    const i = DAYS.indexOf(day), prev = DAYS[i - 1], next = DAYS[i + 1];
+    const prev = dayFor(addDays(day.id, -1)), next = dayFor(addDays(day.id, 1));
     return `<nav class="daynav">
-      ${prev ? `<a href="#/${prev.id}/${sub}">← ${prev.dow} ${prev.date}</a>` : '<span></span>'}
-      ${next ? `<a href="#/${next.id}/${sub}">${next.dow} ${next.date} →</a>` : '<span></span>'}
+      ${prev ? `<a href="#/${prev.id}/${sub}">← ${prev.dowName} ${prev.date}</a>` : '<span></span>'}
+      ${next ? `<a href="#/${next.id}/${sub}">${next.dowName} ${next.date} →</a>` : '<span></span>'}
     </nav>`;
   }
 
@@ -301,12 +602,20 @@
     </label>`;
   }
 
+  function rateRow(day, f, label, lo, hi) {
+    const v = (S.ci[day.id] || {})[f];
+    return `<div class="rate"><span class="rate-label">${label}</span>
+      <div class="rate-btns" role="group" aria-label="${label}">${[1, 2, 3, 4, 5].map((n) => `<button data-act="rate" data-f="${f}" data-day="${day.id}" data-n="${n}" class="${v === n ? 'on' : ''}" aria-pressed="${v === n}">${n}</button>`).join('')}</div>
+      <span class="rate-ends"><em>${lo}</em><em>${hi}</em></span></div>`;
+  }
+
   function checkinCard(day) {
     const ci = S.ci[day.id] || {};
     const water = ci.water || 0;
     let glasses = '';
     for (let i = 1; i <= TARGETS.waterGlasses; i++) glasses += `<button class="glass ${i <= water ? 'full' : ''}" data-act="water" data-n="${i}" aria-label="${i} glasses of water"><svg viewBox="0 0 24 24"><path d="M5 3h14l-1.6 17.2A2 2 0 0 1 15.4 22H8.6a2 2 0 0 1-2-1.8Z" class="g-out"/><path d="M6.3 9.5h11.4l-1.1 10.6a1 1 0 0 1-1 .9H8.4a1 1 0 0 1-1-.9Z" class="g-in"/></svg></button>`;
     const field = (key, label, unit, step) => `<label class="field"><span>${label}</span><span class="inwrap"><input type="number" inputmode="decimal" step="${step}" min="0" data-ci="${key}" data-day="${day.id}" value="${ci[key] ?? ''}" placeholder="–">${unit ? `<em>${unit}</em>` : ''}</span></label>`;
+    const isMon = day.dow === 'mon';
     return `
       <section class="card checkin">
         <div class="card-head"><h2>Daily check-in</h2><span class="muted small">auto-saved</span></div>
@@ -316,10 +625,18 @@
         </div>
         <div class="ci-grid">
           ${field('weight', 'Morning weight', 'kg', '0.1')}
-          ${field('waist', 'Waist at navel', 'cm', '0.5')}
+          ${field('waist', isMon ? 'Waist at navel · <b class="today-tag">today</b>' : 'Waist (Mondays)', 'cm', '0.5')}
           ${field('steps', 'Steps', '', '100')}
-          ${field('sleep', 'Sleep', 'h', '0.5')}
+          ${field('sleep', 'Sleep last night', 'h', '0.5')}
         </div>
+        <div class="rates">
+          ${rateRow(day, 'energy', 'Energy', 'drained', 'great')}
+          ${rateRow(day, 'hunger', 'Hunger', 'full', 'starving')}
+        </div>
+        <label class="field wide"><span>Off-plan food · anything you ate that is not ticked above</span>
+          <span class="inwrap"><input type="text" maxlength="${CI_TXT.off}" data-ci-t="off" data-day="${day.id}" value="${esc(ci.off || '')}" placeholder="e.g. 2 samosa at canteen, birthday cake"></span></label>
+        <label class="field wide"><span>Notes · pain, illness, travel, missed workout and why</span>
+          <span class="inwrap"><input type="text" maxlength="${CI_TXT.note}" data-ci-t="note" data-day="${day.id}" value="${esc(ci.note || '')}" placeholder="optional"></span></label>
       </section>`;
   }
   const waterText = (n) => `${+(n * 0.25).toFixed(2)} L / 3 L`;
@@ -329,6 +646,7 @@
      ============================================================ */
   function workoutPane(day) {
     const w = day.workout;
+    if (!w.blocks.length) return '<section class="card"><p class="muted">Nothing planned. Walk 8,000+ steps and stretch.</p></section>';
     let n = 0;
     const blocks = w.blocks.map((b, bi) => `
       <section class="wblock">
@@ -406,8 +724,8 @@
             ${e.ss ? '<span class="rx-chip ss">Superset ↓ no rest</span>' : ''}
           </div>
           ${e.kg ? `<div class="logrow">
-              <label class="inwrap kg"><input type="number" inputmode="decimal" step="0.5" min="0" data-act="kg" data-k="${kk}" value="${S.kg[kk] ?? ''}" placeholder="–" aria-label="Weight used for ${esc(x.name)} in kg"><em>kg used</em></label>
-              <span class="last">${last ? `Last time (${last.d.dow}): <b>${esc(last.v)} kg</b>` : x.start ? `Start with: <b>${esc(x.start)}</b>` : ''}</span>
+              <label class="inwrap kg"><input type="number" inputmode="decimal" step="0.5" min="0" data-act="kg" data-k="${kk}" value="${esc(S.kg[kk] ?? '')}" placeholder="–" aria-label="Weight used for ${esc(x.name)} in kg"><em>kg used</em></label>
+              <span class="last">${last ? `Last time (${longDate(last.d)}): <b>${esc(last.v)} kg</b>` : x.start ? `Start with: <b>${esc(x.start)}</b>` : ''}</span>
             </div>` : ''}
           <div class="sets ${e.s === 1 ? 'single' : ''}">${bubbles}</div>
           <details class="how">
@@ -424,10 +742,10 @@
   function refreshSummaries() {
     const r = parse();
     if (r.view !== 'day') return;
-    const day = dayById(r.id);
+    const day = dayFor(r.id);
     const fs = $('#foodSummary'); if (fs) fs.innerHTML = foodSummary(day);
     const ws = $('#woSummary'); if (ws) ws.innerHTML = woSummary(day);
-    const strip = $('.daystrip'); if (strip) strip.outerHTML = dayStrip(day);
+    const wk = $('.week'); if (wk) wk.outerHTML = weekStrip(day, r.sub);
   }
 
   /* ============================================================
@@ -490,30 +808,35 @@
   /* ============================================================
      SHOPPING
      ============================================================ */
+  const PERIOD = {
+    month: { key: () => monthOf(TODAY), label: () => `for ${MONTH[+TODAY.slice(5, 7) - 1]} · resets on the 1st` },
+    week: { key: () => 'w' + weekStart(TODAY), label: () => `this week (${rangeLabel(weekStart(TODAY), addDays(weekStart(TODAY), 6))}) · resets on Monday` },
+    once: { key: () => 'once', label: () => 'buy once' },
+  };
   function renderShop() {
-    let idx = 0;
-    const total = SHOPPING.reduce((a, g) => a + g.items.length, 0);
-    const got = Object.keys(S.shop).length;
+    let total = 0, got = 0;
+    const groups = SHOPPING.map((g, gi) => {
+      const per = PERIOD[g.every] || PERIOD.once;
+      const items = g.items.map((it, ii) => {
+        const k = `${per.key()}|${gi}|${ii}`, on = !!S.shop[k];
+        total++; if (on) got++;
+        return `<label class="item ${on ? 'done' : ''}">
+          <input type="checkbox" data-act="shop" data-k="${k}" ${on ? 'checked' : ''}>
+          <span class="tick" aria-hidden="true"></span>
+          <span class="item-main"><span class="item-name">${esc(it.n)}</span><span class="item-qty">${esc(it.why)}</span></span>
+          <span class="item-mac qty">${esc(it.q)}</span>
+        </label>`;
+      }).join('');
+      return `<section class="card"><div class="card-head"><h2>${esc(g.group)}</h2><span class="muted small">${per.label()}</span></div><div class="items">${items}</div></section>`;
+    }).join('');
     app.innerHTML = `
       <section class="page-head">
         <h1>Shopping list</h1>
-        <p>Everything is <b>no-cook</b>: mix, soak, or eat as-is. One trip covers all 6 days. The protein powder lasts ~2 weeks.</p>
+        <p>Everything is <b>no-cook</b>: mix, soak, or eat as-is. Stock up once a month, grab the fresh items every week.</p>
         <div class="bar b-protein big"><i style="width:${pct(got, total)}%"></i></div>
         <p class="muted small">${got} of ${total} bought</p>
       </section>
-      ${SHOPPING.map((g) => `
-        <section class="card">
-          <div class="card-head"><h2>${esc(g.group)}</h2></div>
-          <div class="items">${g.items.map((it) => {
-            const k = 'i' + (idx++), on = !!S.shop[k];
-            return `<label class="item ${on ? 'done' : ''}">
-              <input type="checkbox" data-act="shop" data-k="${k}" ${on ? 'checked' : ''}>
-              <span class="tick" aria-hidden="true"></span>
-              <span class="item-main"><span class="item-name">${esc(it.n)}</span><span class="item-qty">${esc(it.why)}</span></span>
-              <span class="item-mac qty">${esc(it.q)}</span>
-            </label>`;
-          }).join('')}</div>
-        </section>`).join('')}
+      ${groups}
       <section class="page-head"><h1>No-cook recipes</h1></section>
       <div class="recipes">${RECIPES.map((r) => `
         <article class="card recipe"><h3>${esc(r.n)}</h3><p>${esc(r.how)}</p>${r.mac ? `<span class="pill soft">${esc(r.mac)}</span>` : ''}</article>`).join('')}
@@ -524,22 +847,41 @@
      GUIDE
      ============================================================ */
   function renderGuide() {
+    const w = currentWeight() || firstWeight() || PROFILE.startKg;
+    const h = PROFILE.heightCm;
+    const bmi = w / ((h / 100) ** 2);
+    const bmr = 10 * w + 6.25 * h - 5 * PROFILE.age + 5;
+    const maint = bmr * 1.5;
+    const mid = (TARGETS.kcalLow + TARGETS.kcalHigh) / 2;
+    const plan = currentPlan();
+    const split = WEEK_ORDER.map((d) => { const t = plan.days.find((x) => x.dow === d); return `<li><b>${DOW_NAME[d]}</b><span>${t ? esc(t.title) : 'Rest'}</span></li>`; }).join('');
     app.innerHTML = `
       <section class="page-head">
         <h1>How this plan works</h1>
-        <p>Built for: 27 y, male, 5′10″, ~100 kg, pure veg (no egg), no rice, no tea/coffee, IITGN hostel mess, 1.5–2 h of evening training.</p>
+        <p>Built for: ${PROFILE.age} y, ${PROFILE.sex}, 5′10″, started at ~${PROFILE.startKg} kg, ${esc(PROFILE.diet)}, IITGN hostel mess, 1.5–2 h of evening training.</p>
       </section>
 
       <section class="card">
-        <div class="card-head"><h2>Your numbers</h2></div>
+        <div class="card-head"><h2>Your numbers</h2><span class="muted small">at ${r1(w)} kg${currentWeight() ? ' (7-day average)' : ''}</span></div>
         <div class="kv">
-          <div><span>BMI</span><b>31.6</b><em>Goal: below 25, over the coming months</em></div>
-          <div><span>Burn at rest (BMR)</span><b>~1,980 kcal</b><em>Mifflin-St Jeor equation</em></div>
-          <div><span>Maintenance</span><b>~2,900–3,000 kcal</b><em>With evening training + walking around campus</em></div>
-          <div><span>Your intake</span><b>2,000–2,200 kcal</b><em>≈ 800 kcal/day deficit → ~0.7 kg of fat lost per week</em></div>
-          <div><span>Protein</span><b>120–140 g</b><em>≈ 1.5–1.8 g per kg of a ~78 kg goal weight. Protects muscle, keeps you full</em></div>
-          <div><span>Water · Steps · Sleep</span><b>3 L+ · 9,000+ · 7–8 h</b><em>These three matter as much as the diet</em></div>
+          <div><span>BMI</span><b>${bmi.toFixed(1)}</b><em>Goal: below 25 (≈ ${PROFILE.goalKg} kg), over the coming months</em></div>
+          <div><span>Burn at rest (BMR)</span><b>~${fmt(Math.round(bmr / 10) * 10)} kcal</b><em>Mifflin-St Jeor equation. Drops as you lose weight</em></div>
+          <div><span>Maintenance</span><b>~${fmt(Math.round(maint / 50) * 50)} kcal</b><em>With evening training + walking around campus</em></div>
+          <div><span>Your intake</span><b>${fmt(TARGETS.kcalLow)}–${fmt(TARGETS.kcalHigh)} kcal</b><em>≈ ${fmt(Math.round((maint - mid) / 50) * 50)} kcal/day deficit → ~${r1(((maint - mid) * 7) / 7700)} kg of fat per week</em></div>
+          <div><span>Protein</span><b>${TARGETS.proteinLow}–${TARGETS.proteinHigh} g</b><em>≈ 1.5–1.8 g per kg of your goal weight. Protects muscle, keeps you full</em></div>
+          <div><span>Water · Steps · Sleep</span><b>3 L+ · ${fmt(TARGETS.steps)}+ · 7–8 h</b><em>These three matter as much as the diet</em></div>
         </div>
+      </section>
+
+      <section class="card accent-card">
+        <div class="card-head"><h2>How this runs long-term</h2></div>
+        <ul class="bullets">
+          <li><b>Every week:</b> the mess menu repeats weekly, so the same Mon–Sun plan runs all month. Beat last week’s numbers (the app shows “Last time” on each exercise).</li>
+          <li><b>Every day:</b> tick what you eat and the sets you do, and fill the check-in. Weigh in every morning; one weigh-in a day makes the weekly average reliable.</li>
+          <li><b>Every Monday:</b> measure your waist. Progress → “This week vs last week” applies the adjust rule for you.</li>
+          <li><b>Last date of every month:</b> do the month-end review in Progress (measurements + photos + notes), then <b>Export</b> and send the file to Claude <b>together with next month’s mess menu</b>. Claude reviews your month, then updates meals, targets and workouts.</li>
+          <li><b>Keep your records safe:</b> use the same phone and browser, never “clear site data”, and keep each exported file in Google Drive.</li>
+        </ul>
       </section>
 
       <section class="card">
@@ -552,14 +894,20 @@
         </ul>
       </section>
 
-      <section class="card accent-card">
-        <div class="card-head"><h2>Adjust rule (check every Monday)</h2></div>
+      <section class="card">
+        <div class="card-head"><h2>Adjust rule (Progress checks it every week)</h2></div>
         <ul class="bullets">
           <li><b>Losing 0.5–1 kg/week:</b> perfect. Change nothing.</li>
           <li><b>Losing less than 0.3 kg/week for 2 weeks:</b> use Dinner B (Hostel kit) on 3 more nights a week, and add 2,000 steps a day.</li>
           <li><b>Losing more than 1.2 kg/week after week 1,</b> or feeling weak or dizzy: add 1 chapati at lunch.</li>
         </ul>
         <p class="note">Calorie numbers for mess food are estimates. This rule corrects for that automatically using your real results.</p>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2>Weekly training split</h2><span class="muted small">${esc(plan.label)} plan</span></div>
+        <ol class="rhythm">${split}</ol>
+        <p class="note">Every muscle gets trained twice a week with rest in between. Tuesday and Friday are fat-burning cardio days; Sunday is easy recovery.</p>
       </section>
 
       <section class="card">
@@ -574,7 +922,7 @@
           <li><b>8:30</b><span>Light dinner: mess plate (A) or Hostel kit (B)</span></li>
           <li><b>11:30</b><span>Lights off</span></li>
         </ol>
-        <p class="note">Why not skip dinner fully? Your workout ends at 7:30 pm, so dinner is your recovery meal. Option B keeps your “shake + small items” habit but adds real protein and fibre.</p>
+        <p class="note">Why not skip dinner fully? Your workout ends around 7:30 pm, so dinner is your recovery meal. Option B keeps your “shake + small items” habit but adds real protein and fibre.</p>
       </section>
 
       <section class="card">
@@ -593,16 +941,15 @@
         <div class="card-head"><h2>Always skip at your mess</h2></div>
         <div class="skip big">${['Bread + butter + jam', 'Chocos / cornflakes', 'Boost / Bournvita / chocolate powder', 'Sugar in milk & oats', 'Samosa, pakoda, medu vada', 'Puri, bhature (1 max, weekly treat)', 'Fryums, ramakada, papad', 'Lemonade, crushes, shakes, lassi, shikanji', 'Ice cream, halwa, malpua, custard, sev boondi', 'Maggi, white sauce pasta', 'Sev toppings']
           .map((s) => `<span class="chip-x">${s}</span>`).join('')}</div>
-        <p class="note">One planned treat a week keeps you sane. This week it’s Saturday’s single bhatura.</p>
+        <p class="note">One planned treat a week keeps you sane: Saturday’s single bhatura.</p>
       </section>
 
       <section class="card">
         <div class="card-head"><h2>Workout rules</h2></div>
         <ul class="bullets">
-          <li><b>Split:</b> Lower A → Upper A → Cardio/Core → Lower B → Recovery walk → Upper B. Every muscle gets trained twice a week with rest in between.</li>
-          <li><b>Effort:</b> end each set with 2–3 reps left in the tank. On day 1, leave 3–4.</li>
-          <li><b>Progression (from week 2):</b> when you hit the top of the rep range on every set, add 2.5 kg for upper body or 5 kg for lower body.</li>
-          <li><b>Cardio:</b> incline walking and the elliptical are easy on your joints at 100 kg. Add more jogging as your weight drops.</li>
+          <li><b>Effort:</b> end each set with 2–3 reps left in the tank.</li>
+          <li><b>Progression:</b> when you hit the top of the rep range on every set, add 2.5 kg for upper body or 5 kg for lower body next time.</li>
+          <li><b>Cardio:</b> incline walking and the elliptical are easy on your joints at your current weight. When walks feel easy, raise the incline by 1%. Add more jogging as your weight drops.</li>
           <li><b>Steps:</b> 8,000–10,000 every day. Walk to the mess and take the stairs.</li>
         </ul>
       </section>
@@ -616,12 +963,7 @@
           <li>Too little protein, <b>crash dieting</b>, stress, poor sleep</li>
           <li>Genetics (male-pattern hair loss)</li>
         </ul>
-        <p><b>Do this week:</b> get a blood test at the health centre (<b>CBC, ferritin, B12, vitamin D, TSH</b>) and show the results to a doctor before taking any supplements. This plan’s moderate deficit plus 120 g+ protein is designed to avoid diet-related hair shedding.</p>
-      </section>
-
-      <section class="card">
-        <div class="card-head"><h2>After 30 November</h2></div>
-        <p>The mess menu repeats every week, so <b>run this same plan again</b> from Wednesday. Use Tuesday as an extra walk day. Each week: add a little weight or a couple of reps, raise the treadmill incline by 1%, and check the adjust rule on Monday.</p>
+        <p><b>Do this soon:</b> get a blood test at the health centre (<b>CBC, ferritin, B12, vitamin D, TSH</b>) and show the results to a doctor before taking any supplements. Mention the results in a month-end note so the plan can account for them. This plan’s moderate deficit plus 120 g+ protein is designed to avoid diet-related hair shedding.</p>
         <p class="muted small">Food values are estimates for typical mess portions. This is general fitness guidance, not medical advice. If you have a medical condition, check with a doctor first. Exercise photos: <a href="https://github.com/yuhonas/free-exercise-db" target="_blank" rel="noopener">free-exercise-db</a> (public domain).</p>
       </section>`;
   }
@@ -630,49 +972,109 @@
      PROGRESS
      ============================================================ */
   function renderProgress() {
-    const rows = DAYS.map((d) => ({ d, ci: S.ci[d.id] || {}, f: foodTotals(d), w: workoutTotals(d) }));
-    const weights = rows.filter((r) => r.ci.weight).map((r) => ({ id: r.d.id, v: +r.ci.weight }));
-    const waists = rows.filter((r) => r.ci.waist).map((r) => +r.ci.waist);
-    const first = weights[0], last = weights[weights.length - 1];
-    const dW = weights.length > 1 ? last.v - first.v : null;
-    const dWaist = waists.length > 1 ? waists[waists.length - 1] - waists[0] : null;
-    const logged = rows.filter((r) => r.f.ep > 0);
-    const avgP = logged.length ? logged.reduce((a, r) => a + r.f.ep, 0) / logged.length : null;
-    const sessions = rows.filter((r) => r.w.total && r.w.done / r.w.total >= 0.8).length;
-    const sign = (v) => (v > 0 ? '+' : '') + v.toFixed(1);
+    const weeks = weekRows(), months = monthRows(), lifts = strengthRows();
+    const W = weighIns(), first = W[0], cur = currentWeight();
+    const waists = Object.keys(S.ci).filter((id) => isDate(id) && S.ci[id].waist).sort().map((id) => +S.ci[id].waist);
+    const bmi = cur ? cur / ((PROFILE.heightCm / 100) ** 2) : null;
+    const thisWeek = weeks.find((w) => w.from === weekStart(TODAY));
+    const v = verdict(weeks);
+    const due = reviewDue();
+    const review = reviewCard(due ? due.month : monthOf(TODAY), !!(due && !due.done));
+    const months_ = [...new Set(allDates().map(monthOf).concat([monthOf(TODAY >= START ? TODAY : START)]))].sort();
+    const pm = months_.includes(S.ui.pm) ? S.ui.pm : months_[months_.length - 1];
+    const dayIds = allDates().filter((id) => monthOf(id) === pm).reverse();
 
     app.innerHTML = `
       <section class="page-head"><h1>Progress</h1>
-        <p>Your ticks, weights and check-ins are saved <b>in this browser on this phone</b>. They stay after refresh and after closing the app, and nobody else can see them.</p>
+        <p>Your long-term record. Everything is saved <b>in this browser on this phone</b> and stays after refresh and closing the app.</p>
         ${storageOK ? '' : '<p class="warn">Saving is blocked in this browser (private/incognito mode?). Open the site in a normal tab.</p>'}
       </section>
+      ${due && !due.done ? review : ''}
       <section class="stat-grid">
-        <div class="card stat"><span class="m-label">Weight change</span><b>${dW === null ? '–' : sign(dW)}<small> kg</small></b><span class="muted small">${first ? `start ${first.v} kg` : 'log morning weight'}</span></div>
-        <div class="card stat"><span class="m-label">Waist change</span><b>${dWaist === null ? '–' : sign(dWaist)}<small> cm</small></b><span class="muted small">measure Wed & Mon</span></div>
-        <div class="card stat"><span class="m-label">Avg protein</span><b>${avgP === null ? '–' : fmt(avgP)}<small> g</small></b><span class="muted small">target 120+ g</span></div>
-        <div class="card stat"><span class="m-label">Sessions done</span><b>${sessions}<small> / ${DAYS.length}</small></b><span class="muted small">≥ 80% of sets ticked</span></div>
+        <div class="card stat"><span class="m-label">Weight now</span><b>${dash(cur)}<small> kg</small></b><span class="muted small">7-day average</span></div>
+        <div class="card stat"><span class="m-label">Total change</span><b>${first && cur != null ? sign(cur - first.v) : '–'}<small> kg</small></b><span class="muted small">${first ? `since ${niceDate(first.id)} (${first.v} kg)` : 'log morning weight'}</span></div>
+        <div class="card stat"><span class="m-label">Waist change</span><b>${waists.length > 1 ? sign(waists[waists.length - 1] - waists[0]) : '–'}<small> cm</small></b><span class="muted small">${waists.length ? `now ${waists[waists.length - 1]} cm` : 'measure on Mondays'}</span></div>
+        <div class="card stat"><span class="m-label">BMI now</span><b>${bmi ? bmi.toFixed(1) : '–'}</b><span class="muted small">goal below 25</span></div>
       </section>
-      ${weights.length >= 2 ? `<section class="card"><div class="card-head"><h2>Morning weight</h2></div>${spark(weights)}</section>` : ''}
-      <section class="card">
-        <div class="card-head"><h2>Day by day</h2></div>
+
+      <section class="card verdict v-${v.tone}">
+        <div class="card-head"><h2>This week vs last week</h2><span class="muted small">adjust rule</span></div>
+        <p>${esc(v.text)}</p>
+        ${thisWeek ? `<p class="muted small">This week so far: ${thisWeek.workouts} workout${thisWeek.workouts === 1 ? '' : 's'} done · ${thisWeek.weighIns} weigh-in${thisWeek.weighIns === 1 ? '' : 's'}${thisWeek.proteinAvg != null ? ` · avg protein ${thisWeek.proteinAvg} g` : ''}</p>` : ''}
+      </section>
+
+      ${W.length >= 2 ? `<section class="card"><div class="card-head"><h2>Morning weight</h2><span class="muted small"><i class="key k-raw"></i>daily <i class="key k-avg"></i>7-day avg</span></div>${chart(W)}</section>` : ''}
+
+      ${weeks.length ? `<section class="card">
+        <div class="card-head"><h2>Week by week</h2><span class="muted small">newest first</span></div>
         <div class="table-wrap"><table class="ptable">
-          <thead><tr><th>Day</th><th>Weight</th><th>Waist</th><th>Water</th><th>Steps</th><th>Sleep</th><th>Kcal</th><th>Protein</th><th>Workout</th></tr></thead>
-          <tbody>${rows.map((r) => `<tr>
-            <td><a href="#/${r.d.id}">${r.d.dow} ${r.d.date.split(' ')[0]}</a></td>
-            <td>${r.ci.weight ? r.ci.weight : '–'}</td>
-            <td>${r.ci.waist ? r.ci.waist : '–'}</td>
-            <td>${r.ci.water ? +(r.ci.water * 0.25).toFixed(2) + ' L' : '–'}</td>
-            <td>${r.ci.steps ? fmt(r.ci.steps) : '–'}</td>
-            <td>${r.ci.sleep ? r.ci.sleep + ' h' : '–'}</td>
-            <td>${r.f.ek ? fmt(r.f.ek) : '–'}</td>
-            <td>${r.f.ep ? r.f.ep + ' g' : '–'}</td>
-            <td><span class="mini-bar"><i style="width:${pct(r.w.done, r.w.total)}%"></i></span>${pct(r.w.done, r.w.total)}%</td>
+          <thead><tr><th>Week</th><th>Avg kg</th><th>Change</th><th>Waist</th><th>Kcal</th><th>Protein</th><th>Workouts</th><th>Steps</th><th>Sleep</th></tr></thead>
+          <tbody>${weeks.slice().reverse().map((w) => `<tr>
+            <td>${rangeLabel(w.from, w.to)}</td>
+            <td>${dash(w.weightAvg)}${w.weighIns ? `<span class="muted"> ·${w.weighIns}</span>` : ''}</td>
+            <td class="${w.change < 0 ? 'good' : w.change > 0 ? 'bad' : ''}">${w.change == null ? '–' : sign(w.change)}</td>
+            <td>${dash(w.waist)}</td>
+            <td>${dash(w.kcalAvg, fmt)}</td>
+            <td>${dash(w.proteinAvg, (x) => x + ' g')}</td>
+            <td>${w.workouts} / 7</td>
+            <td>${dash(w.stepsAvg, fmt)}</td>
+            <td>${dash(w.sleepAvg, (x) => x + ' h')}</td>
           </tr>`).join('')}</tbody>
         </table></div>
-      </section>
+        <p class="muted small">Avg kg ·n = number of weigh-ins that week. Kcal and protein are averages of days you ticked food.</p>
+      </section>` : ''}
+
+      ${months.length ? `<section class="card">
+        <div class="card-head"><h2>Month by month</h2></div>
+        <div class="table-wrap"><table class="ptable">
+          <thead><tr><th>Month</th><th>Weight</th><th>Change</th><th>Waist</th><th>Kcal</th><th>Protein</th><th>Workouts</th><th>Days logged</th></tr></thead>
+          <tbody>${months.slice().reverse().map((m) => `<tr>
+            <td>${monthLabel(m.month)}</td>
+            <td>${m.weightStart != null ? `${m.weightStart} → ${m.weightEnd}` : '–'}</td>
+            <td class="${m.weightChange < 0 ? 'good' : m.weightChange > 0 ? 'bad' : ''}">${m.weightChange == null ? '–' : sign(m.weightChange)}</td>
+            <td>${m.waistChange == null ? '–' : sign(m.waistChange) + ' cm'}</td>
+            <td>${dash(m.kcalAvg, fmt)}</td>
+            <td>${dash(m.proteinAvg, (x) => x + ' g')}</td>
+            <td>${m.workouts}</td>
+            <td>${m.daysLogged}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>
+      </section>` : ''}
+
+      ${lifts.length ? `<section class="card">
+        <div class="card-head"><h2>Strength</h2><span class="muted small">kg used, first → latest</span></div>
+        <div class="table-wrap"><table class="ptable">
+          <thead><tr><th>Exercise</th><th>First</th><th>Latest</th><th>Change</th><th>Sessions</th></tr></thead>
+          <tbody>${lifts.map((l) => { const a = l.log[0], b = l.log[l.log.length - 1]; return `<tr>
+            <td>${esc(l.name)}</td><td>${a[1]} kg</td><td>${b[1]} kg <span class="muted">${niceDate(b[0])}</span></td>
+            <td class="${b[1] > a[1] ? 'good' : ''}">${l.log.length > 1 ? sign(b[1] - a[1]) : '–'}</td><td>${l.log.length}</td></tr>`; }).join('')}</tbody>
+        </table></div>
+      </section>` : ''}
+
       <section class="card">
-        <div class="card-head"><h2>Backup</h2></div>
-        <p class="muted small">Your data lives only in this browser. Clearing browser data or switching phones erases it, so export a backup once in a while.</p>
+        <div class="card-head"><h2>Day by day</h2></div>
+        <div class="chips">${months_.map((m) => `<button class="chipbtn ${m === pm ? 'on' : ''}" data-act="pm" data-m="${m}">${MON[+m.slice(5) - 1]} ${m.slice(2, 4)}</button>`).join('')}</div>
+        ${dayIds.length ? `<div class="table-wrap"><table class="ptable">
+          <thead><tr><th>Day</th><th>Weight</th><th>Waist</th><th>Kcal</th><th>Protein</th><th>Workout</th><th>Steps</th><th>Sleep</th><th>Water</th><th>Energy</th><th>Notes</th></tr></thead>
+          <tbody>${dayIds.map((id) => { const ci = S.ci[id] || {}, sn = S.days[id] || {}; return `<tr>
+            <td>${dayFor(id) ? `<a href="#/${id}">${longDate(id)}</a>` : longDate(id)}</td>
+            <td>${dash(ci.weight)}</td><td>${dash(ci.waist)}</td>
+            <td>${sn.kcal && sn.kcal[0] ? fmt(sn.kcal[0]) : '–'}</td>
+            <td>${sn.prot && sn.prot[0] ? sn.prot[0] + ' g' : '–'}</td>
+            <td>${sn.sets && sn.sets[1] ? `<span class="mini-bar"><i style="width:${pct(sn.sets[0], sn.sets[1])}%"></i></span>${pct(sn.sets[0], sn.sets[1])}%` : '–'}</td>
+            <td>${dash(ci.steps, fmt)}</td><td>${dash(ci.sleep, (x) => x + ' h')}</td>
+            <td>${ci.water ? +(ci.water * 0.25).toFixed(2) + ' L' : '–'}</td><td>${dash(ci.energy)}</td>
+            <td class="wrapcell">${esc([ci.off && 'Off-plan: ' + ci.off, ci.note].filter(Boolean).join(' · ')) || '–'}</td>
+          </tr>`; }).join('')}</tbody>
+        </table></div>` : '<p class="muted small">Nothing logged in this month yet.</p>'}
+      </section>
+
+      ${due && !due.done ? '' : review}
+
+      <section class="card">
+        <div class="card-head"><h2>Backup</h2><span class="muted small">${S.ui.lastExport ? `last export ${niceDate(S.ui.lastExport)}` : 'never exported'}</span></div>
+        <p class="muted small">Your data lives only in this browser. Clearing browser data or switching phones erases it, so export a backup every week or two and keep it in Google Drive.</p>
+        <p class="muted small" style="margin-top:8px">${persisted === true ? '✓ This browser has marked your data as <b>protected</b> from automatic cleanup.' : 'Tip: add the site to your home screen. Browsers then protect its data from automatic cleanup.'}</p>
         <p class="muted small" style="margin-top:8px"><b>Import</b> only accepts a <code>fit-plan-backup-….json</code> file exported from this site. It replaces what is on this phone now.</p>
         <div class="actions">
           <button class="btn" data-act="export">Export backup</button>
@@ -683,35 +1085,80 @@
       </section>`;
   }
 
-  function spark(pts) {
-    const W = 600, H = 170, P = 30;
+  function reviewCard(m, hot) {
+    const mo = S.mo[m] || {};
+    const end = lastOfMonth(m);
+    const f = (key, label) => `<label class="field"><span>${label}</span><span class="inwrap"><input type="number" inputmode="decimal" step="0.5" min="0" data-mo="${key}" data-m="${m}" value="${mo[key] ?? ''}" placeholder="–"><em>cm</em></span></label>`;
+    return `<section class="card review ${hot ? 'hot' : ''}" id="review">
+      <div class="card-head"><h2>Month-end review · ${monthLabel(m)}</h2><span class="muted small">do it on ${longDate(end)}</span></div>
+      <ol class="steps">
+        <li>That morning: log <b>weight</b> and <b>waist</b> in the daily check-in.</li>
+        <li>Measure the rest with the tape (relaxed, same spot each month):
+          <div class="ci-grid">${f('hips', 'Hips (widest)')}${f('chest', 'Chest (nipple line)')}${f('arm', 'Upper arm (mid)')}${f('thigh', 'Thigh (mid)')}</div></li>
+        <li>Take front, side and back <b>photos</b> in the same light. Keep them in your gallery, not here.
+          <label class="item ${mo.photos ? 'done' : ''}" style="margin-top:8px"><input type="checkbox" data-mo-c="photos" data-m="${m}" ${mo.photos ? 'checked' : ''}><span class="tick" aria-hidden="true"></span><span class="item-main"><span class="item-name">Photos taken</span></span></label></li>
+        <li>How did the month go? Energy, hunger, what was hard, injuries, blood-test results:
+          <label class="field wide"><span class="inwrap tall"><textarea rows="3" maxlength="1000" data-mo-t="feel" data-m="${m}" placeholder="Write a few honest lines">${esc(mo.feel || '')}</textarea></span></label></li>
+        <li><b>Export</b> and send the file to Claude <b>with next month’s mess menu</b>.</li>
+      </ol>
+      <div class="actions"><button class="btn" data-act="export">Export review file</button></div>
+    </section>`;
+  }
+
+  function chart(pts) {
+    const Wd = 420, H = 200, PL = 34, PR = 12, PT = 16, PB = 26;
+    const a = pts[0].id, b = pts[pts.length - 1].id, span = Math.max(1, dayDiff(a, b));
+    const trend = pts.map((p) => ({ id: p.id, v: avgWeightAround(p.id) }));
     const vs = pts.map((p) => p.v);
-    let lo = Math.min(...vs), hi = Math.max(...vs);
-    if (hi - lo < 1) { lo -= 0.5; hi += 0.5; }
-    const x = (i) => P + (i * (W - 2 * P)) / Math.max(1, pts.length - 1);
-    const y = (v) => P + ((hi - v) * (H - 2 * P - 14)) / (hi - lo);
-    const d = pts.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
-    return `<svg class="spark" viewBox="0 0 ${W} ${H}" role="img" aria-label="Morning weight trend"><path d="${d}"/>${pts.map((p, i) => `<circle cx="${x(i)}" cy="${y(p.v)}" r="4.5"/><text x="${x(i)}" y="${y(p.v) - 11}" text-anchor="middle">${p.v}</text><text class="lbl" x="${x(i)}" y="${H - 6}" text-anchor="middle">${dayById(p.id).dow}</text>`).join('')}</svg>`;
+    const lo = Math.floor(Math.min(...vs) - 0.5), hi = Math.ceil(Math.max(...vs) + 0.5);
+    const x = (id) => PL + (dayDiff(a, id) / span) * (Wd - PL - PR);
+    const y = (v) => PT + ((hi - v) / (hi - lo)) * (H - PT - PB);
+    const steps = hi - lo <= 4 ? 1 : hi - lo <= 10 ? 2 : 5;
+    let grid = '';
+    for (let g = Math.ceil(lo / steps) * steps; g <= hi; g += steps) grid += `<line x1="${PL}" x2="${Wd - PR}" y1="${y(g)}" y2="${y(g)}" class="gl"/><text x="${PL - 6}" y="${y(g) + 4}" text-anchor="end" class="lbl">${g}</text>`;
+    const path = trend.map((p, i) => `${i ? 'L' : 'M'}${x(p.id).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
+    const dots = pts.map((p) => `<circle cx="${x(p.id).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="${pts.length > 40 ? 2.5 : 3.5}" class="raw"/>`).join('');
+    const last = trend[trend.length - 1];
+    return `<svg class="spark" viewBox="0 0 ${Wd} ${H}" role="img" aria-label="Morning weight from ${niceDate(a)} to ${niceDate(b)}">
+      ${grid}${dots}<path d="${path}"/>
+      <circle cx="${x(last.id)}" cy="${y(last.v)}" r="5" class="end"/>
+      <text x="${Math.min(x(last.id), Wd - PR - 30)}" y="${y(last.v) - 10}" text-anchor="middle">${r1(last.v)}</text>
+      <text x="${PL}" y="${H - 8}" class="lbl">${niceDate(a)}</text>
+      <text x="${Wd - PR}" y="${H - 8}" text-anchor="end" class="lbl">${niceDate(b)}</text>
+    </svg>`;
   }
 
   /* ============================================================
      EVENTS
      ============================================================ */
+  const dayOfKey = (k) => k.split('|')[0];
+
   document.addEventListener('change', (e) => {
     const t = e.target, act = t.dataset.act;
     if (act === 'food' || act === 'shop') {
       const store = act === 'food' ? S.c : S.shop;
       if (t.checked) store[t.dataset.k] = 1; else delete store[t.dataset.k];
       t.closest('.item').classList.toggle('done', t.checked);
-      save();
-      if (act === 'food') refreshSummaries(); else rerenderKeepScroll();
+      if (act === 'food') { snap(dayOfKey(t.dataset.k)); save(); refreshSummaries(); }
+      else { save(); rerenderKeepScroll(); }
     } else if (act === 'kg') {
-      if (t.value === '') delete S.kg[t.dataset.k]; else S.kg[t.dataset.k] = t.value;
+      if (t.value === '' || !num(t.value)) delete S.kg[t.dataset.k]; else S.kg[t.dataset.k] = String(+t.value);
       save();
     } else if (t.dataset.ci) {
       const id = t.dataset.day;
       S.ci[id] = S.ci[id] || {};
-      if (t.value === '') delete S.ci[id][t.dataset.ci]; else S.ci[id][t.dataset.ci] = +t.value;
+      if (t.value === '' || !num(t.value)) delete S.ci[id][t.dataset.ci]; else S.ci[id][t.dataset.ci] = +t.value;
+      save();
+    } else if (t.dataset.ciT) {
+      const id = t.dataset.day, f = t.dataset.ciT, s = str(t.value, CI_TXT[f] || 200);
+      S.ci[id] = S.ci[id] || {};
+      if (s) S.ci[id][f] = s; else delete S.ci[id][f];
+      save();
+    } else if (t.dataset.mo || t.dataset.moT || t.dataset.moC) {
+      const m = t.dataset.m; S.mo[m] = S.mo[m] || {};
+      if (t.dataset.mo) { if (t.value === '' || !num(t.value)) delete S.mo[m][t.dataset.mo]; else S.mo[m][t.dataset.mo] = +t.value; }
+      else if (t.dataset.moT) { const s = str(t.value, 1000); if (s) S.mo[m].feel = s; else delete S.mo[m].feel; }
+      else { if (t.checked) S.mo[m].photos = 1; else delete S.mo[m].photos; t.closest('.item').classList.toggle('done', t.checked); }
       save();
     } else if (act === 'import') {
       const f = t.files && t.files[0];
@@ -735,11 +1182,11 @@
       if (b.dataset.single === '1') b.textContent = on ? 'Done ✓' : 'Mark done';
       const card = b.closest('.ex');
       card.classList.toggle('complete', $$('.set', card).every((x) => x.classList.contains('on')));
-      save(); refreshSummaries();
+      snap(dayOfKey(k)); save(); refreshSummaries();
       const rest = +b.dataset.rest;
       if (on && rest > 0) startTimer(rest);
     } else if (act === 'dinner') {
-      S.d[b.dataset.day] = b.dataset.v; save(); rerenderKeepScroll();
+      S.d[b.dataset.day] = b.dataset.v; snap(b.dataset.day); save(); rerenderKeepScroll();
     } else if (act === 'water') {
       const id = parse().id; S.ci[id] = S.ci[id] || {};
       const n = +b.dataset.n;
@@ -748,19 +1195,23 @@
       const w = S.ci[id].water;
       $$('.glass').forEach((g) => g.classList.toggle('full', +g.dataset.n <= w));
       $('#waterTxt').textContent = waterText(w);
+    } else if (act === 'rate') {
+      const id = b.dataset.day, f = b.dataset.f, n = +b.dataset.n;
+      S.ci[id] = S.ci[id] || {};
+      if (S.ci[id][f] === n) delete S.ci[id][f]; else S.ci[id][f] = n;
+      save();
+      $$(`button[data-act="rate"][data-f="${f}"]`).forEach((x) => { const on = +x.dataset.n === S.ci[id][f]; x.classList.toggle('on', on); x.setAttribute('aria-pressed', on); });
+    } else if (act === 'pm') {
+      S.ui.pm = b.dataset.m; save(); rerenderKeepScroll();
     } else if (act === 'wakelock') {
       toggleWake();
     } else if (act === 'pick-import') {
       $('#importFile').click();
     } else if (act === 'export') {
-      const file = { app: BACKUP_APP, version: BACKUP_VER, exported: new Date().toISOString(), data: S };
-      const blob = new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob); a.download = `fit-plan-backup-${TODAY}.json`;
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      doExport();
+      if (parse().view === 'progress') rerenderKeepScroll();
     } else if (act === 'reset') {
-      if (confirm('Erase ALL ticks, weights and check-ins on this phone?')) { S = blank(); save(); route(); }
+      if (confirm('Erase ALL ticks, weights, check-ins and history on this phone?\n\nExport a backup first if you might need it.')) { S = blank(); save(); route(); }
     }
   });
 
@@ -773,5 +1224,6 @@
     window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
   }
 
+  ensureSnaps();
   route();
 })();
