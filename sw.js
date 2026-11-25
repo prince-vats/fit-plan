@@ -1,6 +1,6 @@
 /* Network-first service worker: always fresh when online,
    falls back to the last cached copy when the gym has no signal. */
-const CACHE = 'fitplan-v3';
+const CACHE = 'fitplan-v4';
 
 self.addEventListener('install', (e) => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));

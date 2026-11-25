@@ -11,8 +11,17 @@ Live: https://prince-vats.github.io/fit-plan/
 - **Shopping**: monthly stock + weekly fresh list (ticks reset automatically) + no-cook recipes.
 - **Guide**: targets (recalculated from current weight), the mess-plate rule, the adjust rule, hair-fall notes.
 
-All records are saved in the browser's `localStorage` on the phone. No server, no account.
-Each day also stores a frozen snapshot, so later plan changes never rewrite history.
+All records are saved in the browser's `localStorage`, and each day stores a frozen snapshot so later plan changes never rewrite history.
+
+## Sync across devices (free, private)
+
+Optional: Progress → **Sync across devices** saves the data as `fit-plan-data.json` in a **private** GitHub repo (e.g. `prince-vats/fit-data`) through the GitHub API. No server needed.
+
+1. Create a private repo `fit-data` (tick "Add a README file").
+2. Create a [fine-grained token](https://github.com/settings/personal-access-tokens/new): *Only select repositories → fit-data*, *Repository permissions → Contents: Read and write*.
+3. Paste the token in the app on each device and tap Connect.
+
+The app pulls when opened, pushes ~15 s after changes (at most about once a minute) and immediately when you leave the app. If two devices edit at once, the copies are merged without losing entries. Every sync is a commit, so the repo history is a full version history. The token stays on the device and is never exported; the app refuses to sync into a public repo.
 
 ## Monthly routine
 

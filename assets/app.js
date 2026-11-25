@@ -22,10 +22,13 @@
       return out;
     } catch (e) { return blank(); }
   }
-  function save() {
+  // save(): your data changed → stored on this phone AND queued for cloud sync.
+  // saveQuiet(): only view preferences changed (tab, collapsed card) → this phone only.
+  function saveQuiet() {
     try { localStorage.setItem(KEY, JSON.stringify(S)); storageOK = true; }
     catch (e) { storageOK = false; }
   }
+  function save() { saveQuiet(); markDirty(); }
 
   // Ask the browser not to auto-clear this site's storage (long-term records).
   try {
@@ -307,6 +310,181 @@
   }
 
   /* ============================================================
+     CLOUD SYNC — free & private: one JSON file in YOUR private GitHub
+     repo, written with a token that can only touch that repo.
+     Every save is a commit, so GitHub keeps every past version.
+     Token + sync status live in their own key and are never exported.
+     ============================================================ */
+  const SYNC_KEY = 'hostelFitPlan:sync';
+  const SYNC_FILE = 'fit-plan-data.json';
+  const PUSH_DELAY = 15000;      // wait for a quiet moment after your last change
+  const PUSH_MIN_GAP = 60000;    // at most ~1 commit a minute while you use the app
+  let SY = loadSync();           // { repo, token, sha, at, dirty, err }
+  let syncState = '', syncMsg = '';
+  let pushTimer = null, lastPush = 0, syncBusy = false, syncAgain = false, editSeq = 0;
+
+  function loadSync() { try { const v = JSON.parse(localStorage.getItem(SYNC_KEY)); return isObj(v) ? v : {}; } catch (e) { return {}; } }
+  function saveSync() { try { localStorage.setItem(SYNC_KEY, JSON.stringify(SY)); } catch (e) { /* ignore */ } }
+  function syncOn() { return !!(SY.repo && SY.token); }
+
+  function markDirty() {
+    if (!syncOn()) return;
+    editSeq++;
+    if (!SY.dirty) { SY.dirty = true; saveSync(); }
+    schedulePush();
+  }
+  function schedulePush(delay = PUSH_DELAY) {
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(() => syncNow(), Math.max(delay, PUSH_MIN_GAP - (Date.now() - lastPush)));
+  }
+
+  function gh(path, opt = {}) {
+    const headers = { Authorization: `Bearer ${SY.token}`, Accept: opt.raw ? 'application/vnd.github.raw+json' : 'application/vnd.github+json' };
+    if (opt.body) headers['Content-Type'] = 'application/json';
+    return fetch(`https://api.github.com/repos/${SY.repo}${path}`, { method: opt.method || 'GET', headers, body: opt.body, cache: 'no-store' });
+  }
+  function ghError(status) {
+    const e = new Error(
+      status === 401 ? 'GitHub rejected the token (wrong or expired). Create a new token and connect again.'
+        : status === 403 ? 'The token is not allowed to write here. It needs “Contents: Read and write” on this repo.'
+          : status === 404 ? 'Repo not found, or the token was not given access to it.'
+            : `GitHub error ${status}. Will retry later.`);
+    e.fatal = status === 401 || status === 403 || status === 404;
+    return e;
+  }
+  const toB64 = (s) => {
+    const b = new TextEncoder().encode(s); let bin = '';
+    for (let i = 0; i < b.length; i += 0x8000) bin += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+    return btoa(bin);
+  };
+  const fromB64 = (s) => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\s/g, '')), (c) => c.charCodeAt(0)));
+  const device = () => { const u = navigator.userAgent; return /Android/.test(u) ? 'Android' : /iPhone|iPad/.test(u) ? 'iPhone' : /Windows/.test(u) ? 'Windows' : /Mac/.test(u) ? 'Mac' : 'browser'; };
+
+  async function fetchRemote() {
+    const path = `/contents/${SYNC_FILE}`;
+    const r = await gh(path);
+    if (r.status === 404) return null;
+    if (!r.ok) throw ghError(r.status);
+    const j = await r.json();
+    let txt = j.content && j.encoding === 'base64' ? fromB64(j.content) : null;
+    if (txt == null) { const r2 = await gh(path, { raw: true }); if (!r2.ok) throw ghError(r2.status); txt = await r2.text(); } // files > 1 MB
+    return { sha: j.sha, txt };
+  }
+  async function putRemote(sha) {
+    const now = new Date();
+    const body = {
+      message: `sync ${localISO(now)} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')} · ${device()}`,
+      content: toB64(JSON.stringify({ app: BACKUP_APP, version: BACKUP_VER, saved: now.toISOString(), data: S })),
+    };
+    if (sha) body.sha = sha;
+    const r = await gh(`/contents/${SYNC_FILE}`, { method: 'PUT', body: JSON.stringify(body) });
+    if (r.status === 409 || r.status === 422) return { conflict: true };
+    if (!r.ok) throw ghError(r.status);
+    return { sha: (await r.json()).content.sha };
+  }
+
+  // Combine two copies without losing anything: union of all days/ticks/logs;
+  // where both have the same field, this phone's unsynced edit wins.
+  function mergeStates(remote, local) {
+    const out = blank();
+    for (const k of SECTIONS) out[k] = Object.assign({}, remote[k], local[k]);
+    for (const k of ['ci', 'mo']) {
+      for (const id of Object.keys(remote[k])) if (local[k][id]) out[k][id] = Object.assign({}, remote[k][id], local[k][id]);
+    }
+    return out;
+  }
+  const hasData = (st) => SECTIONS.some((k) => k !== 'ui' && Object.keys(st[k] || {}).length);
+
+  function rerenderSafe() {
+    const a = document.activeElement;
+    if (a && /INPUT|TEXTAREA/.test(a.tagName)) return; // never yank the page while you type
+    rerenderKeepScroll();
+  }
+  function setSync(state, msg) {
+    syncState = state; syncMsg = msg || '';
+    const dot = $('#syncDot');
+    if (dot) {
+      dot.hidden = !syncOn();
+      dot.className = `syncdot s-${state}`;
+      dot.title = state === 'ok' ? 'Synced to GitHub' : state === 'syncing' ? 'Syncing…' : syncMsg;
+    }
+    const el = $('#syncStatus'); if (el) el.innerHTML = syncStatusHTML();
+  }
+
+  async function syncNow() {
+    if (!syncOn()) return;
+    if (syncBusy) { syncAgain = true; return; }
+    if (!navigator.onLine) { setSync('offline', 'Offline. Changes are safe on this phone and will sync when you are back online.'); return; }
+    syncBusy = true; clearTimeout(pushTimer); setSync('syncing');
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const remote = await fetchRemote();
+        let pulled = false;
+        if (remote && remote.sha !== SY.sha) { // another device saved since our last sync
+          const rs = readBackup(remote.txt).state;
+          if (SY.dirty) S = mergeStates(rs, S);
+          else { rs.ui = Object.assign({}, rs.ui, S.ui, { lastExport: [rs.ui.lastExport, S.ui.lastExport].filter(Boolean).sort().pop() }); S = rs; }
+          ensureSnaps(); saveQuiet(); dayCache.clear(); pulled = true;
+        }
+        if (!SY.dirty && remote) { SY.sha = remote.sha; if (pulled) rerenderSafe(); break; }
+        const seq = editSeq;
+        const res = await putRemote(remote && remote.sha);
+        if (res.conflict) continue; // someone saved in between: pull + merge again
+        SY.sha = res.sha; lastPush = Date.now();
+        SY.dirty = editSeq !== seq; // edits made while uploading still need a push
+        if (pulled) rerenderSafe();
+        break;
+      }
+      SY.at = new Date().toISOString(); SY.err = ''; saveSync();
+      setSync('ok');
+    } catch (e) {
+      const offline = e instanceof TypeError; // fetch() network failure
+      SY.err = offline ? '' : e.message; saveSync();
+      setSync(offline ? 'offline' : 'error', offline ? 'Could not reach GitHub. Will retry.' : e.message);
+      if (!e.fatal) schedulePush(PUSH_MIN_GAP);
+    } finally {
+      syncBusy = false;
+      if (syncAgain) { syncAgain = false; if (SY.dirty) schedulePush(2000); }
+      else if (SY.dirty) schedulePush();
+    }
+  }
+
+  async function connectSync(repoIn, tokenIn) {
+    const repo = String(repoIn || '').trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').replace(/\/+$/, '');
+    const token = String(tokenIn || '').trim();
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error('Repo must look like username/repo-name, e.g. prince-vats/fit-data.');
+    if (!/^(github_pat_|ghp_)\w{20,}$/.test(token)) throw new Error('That does not look like a GitHub token. It starts with github_pat_.');
+    const prev = SY;
+    SY = { repo, token };
+    try {
+      const r = await gh('');
+      if (!r.ok) throw ghError(r.status);
+      const info = await r.json();
+      if (!info.private) throw new Error('This repo is PUBLIC, so anyone could read your health data. Make it private (repo Settings → General → Danger Zone → Change visibility) and connect again.');
+    } catch (e) {
+      SY = prev; saveSync();
+      throw e instanceof TypeError ? new Error('Could not reach GitHub. Check your internet and try again.') : e;
+    }
+    SY.dirty = hasData(S); // first connect: upload what this phone has (merged with any cloud copy)
+    saveSync();
+    await syncNow();
+    if (syncState === 'error') throw new Error(syncMsg);
+  }
+  function disconnectSync() { clearTimeout(pushTimer); SY = {}; saveSync(); setSync(''); }
+
+  function ago(iso) {
+    const s = Math.round((Date.now() - new Date(iso)) / 1000);
+    return s < 60 ? 'just now' : s < 3600 ? `${Math.floor(s / 60)} min ago` : s < 86400 ? `${Math.floor(s / 3600)} h ago` : `${Math.floor(s / 86400)} days ago`;
+  }
+  function syncStatusHTML() {
+    if (!syncOn()) return '';
+    if (syncState === 'syncing') return '<span class="sy sy-syncing">Syncing…</span>';
+    if (syncState === 'error' || SY.err) return `<span class="sy sy-error">${esc(syncMsg || SY.err)}</span>`;
+    if (syncState === 'offline') return `<span class="sy sy-offline">${esc(syncMsg)}</span>`;
+    return `<span class="sy sy-ok">✓ Synced${SY.at ? ' ' + ago(SY.at) : ''}${SY.dirty ? ' · new changes waiting to upload' : ''}</span>`;
+  }
+
+  /* ============================================================
      HISTORY MATHS (weeks, months, strength, adjust rule)
      ============================================================ */
   function allDates() {
@@ -418,7 +596,7 @@
   function route() {
     const r = parse();
     $$('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.tab === (r.view === 'day' ? 'plan' : r.view)));
-    if (r.view === 'day') { S.ui.sub = r.sub; save(); renderDay(dayFor(r.id), r.sub); }
+    if (r.view === 'day') { S.ui.sub = r.sub; saveQuiet(); renderDay(dayFor(r.id), r.sub); }
     else if (r.view === 'shop') renderShop();
     else if (r.view === 'guide') renderGuide();
     else renderProgress();
@@ -801,7 +979,7 @@
       if (wakeLock) { await wakeLock.release(); wakeLock = null; }
       else { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; refreshSummaries(); }); }
     } catch (e) { wakeLock = null; }
-    S.ui.wantWake = !!wakeLock; save();
+    S.ui.wantWake = !!wakeLock; saveQuiet();
     refreshSummaries();
   }
 
@@ -1071,9 +1249,13 @@
 
       ${due && !due.done ? '' : review}
 
+      ${syncCard()}
+
       <section class="card">
         <div class="card-head"><h2>Backup</h2><span class="muted small">${S.ui.lastExport ? `last export ${niceDate(S.ui.lastExport)}` : 'never exported'}</span></div>
-        <p class="muted small">Your data lives only in this browser. Clearing browser data or switching phones erases it, so export a backup every week or two and keep it in Google Drive.</p>
+        <p class="muted small">${syncOn()
+          ? 'Cloud sync is on, so your data is also safe in your GitHub repo. Export is still how you send Claude your month-end review.'
+          : 'Without sync, your data lives only in this browser. Clearing browser data or switching phones erases it, so turn on sync above, or export a backup every week or two and keep it in Google Drive.'}</p>
         <p class="muted small" style="margin-top:8px">${persisted === true ? '✓ This browser has marked your data as <b>protected</b> from automatic cleanup.' : 'Tip: add the site to your home screen. Browsers then protect its data from automatic cleanup.'}</p>
         <p class="muted small" style="margin-top:8px"><b>Import</b> only accepts a <code>fit-plan-backup-….json</code> file exported from this site. It replaces what is on this phone now.</p>
         <div class="actions">
@@ -1083,6 +1265,41 @@
           <button class="btn danger" data-act="reset">Reset everything</button>
         </div>
       </section>`;
+  }
+
+  function syncCard() {
+    if (syncOn()) {
+      return `<section class="card sync-card" id="sync">
+        <div class="card-head"><h2>Sync across devices</h2><span class="muted small">on</span></div>
+        <p class="small">Saving to your private repo <b>${esc(SY.repo)}</b>. Every device you connect shows the same data.</p>
+        <p class="small" id="syncStatus">${syncStatusHTML()}</p>
+        <div class="actions">
+          <button class="btn" data-act="sync-now">Sync now</button>
+          <a class="btn ghost" href="https://github.com/${esc(SY.repo)}/commits" target="_blank" rel="noopener">Version history</a>
+          <button class="btn danger" data-act="sync-off">Disconnect this device</button>
+        </div>
+        <p class="muted small" style="margin-top:10px">New phone or laptop? Open this site there, come to Progress → Sync, paste your token, and your full history downloads.</p>
+      </section>`;
+    }
+    return `<section class="card sync-card" id="sync">
+      <div class="card-head"><h2>Sync across devices</h2><span class="muted small">free · private · off</span></div>
+      <p class="small">Keep your records in your own <b>private GitHub repo</b> instead of only in this browser: same data on phone and laptop, nothing lost if you clear the browser or change phones, and every past version kept.</p>
+      <details class="how">
+        <summary>One-time setup (5 minutes)</summary>
+        <ol class="steps">
+          <li>Create a <b>private</b> repo: <a href="https://github.com/new" target="_blank" rel="noopener">github.com/new</a> → name <code>fit-data</code> → choose <b>Private</b> → tick <b>Add a README file</b> → Create.</li>
+          <li>Create a token: <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">GitHub → Fine-grained token</a> → name <code>fit-plan sync</code> → expiration: the longest offered → <b>Repository access: Only select repositories → fit-data</b> → <b>Permissions → Repository permissions → Contents: Read and write</b> → Generate → copy it.</li>
+          <li>Paste it below and tap Connect. Do the same on each device (keep the token in your password manager or Google Keep).</li>
+        </ol>
+        <p class="muted small">The token can only read/write that one private repo. It stays on your device and is never included in exports.</p>
+      </details>
+      <div class="ci-grid sync-grid">
+        <label class="field"><span>Private repo</span><span class="inwrap"><input type="text" id="syRepo" value="${esc((SY.lastRepo) || 'prince-vats/fit-data')}" autocomplete="off" autocapitalize="off" spellcheck="false"></span></label>
+        <label class="field"><span>Token</span><span class="inwrap"><input type="password" id="syToken" placeholder="github_pat_…" autocomplete="off" autocapitalize="off" spellcheck="false"></span></label>
+      </div>
+      <p class="small" id="syncErr" role="alert"></p>
+      <div class="actions"><button class="btn" data-act="sync-connect">Connect</button></div>
+    </section>`;
   }
 
   function reviewCard(m, hot) {
@@ -1168,7 +1385,7 @@
   });
 
   document.addEventListener('toggle', (e) => {
-    if (e.target.dataset && e.target.dataset.act === 'seenhow' && !e.target.open) { S.ui.seenHow = 1; save(); }
+    if (e.target.dataset && e.target.dataset.act === 'seenhow' && !e.target.open) { S.ui.seenHow = 1; saveQuiet(); }
   }, true);
 
   app.addEventListener('click', (e) => {
@@ -1202,22 +1419,42 @@
       save();
       $$(`button[data-act="rate"][data-f="${f}"]`).forEach((x) => { const on = +x.dataset.n === S.ci[id][f]; x.classList.toggle('on', on); x.setAttribute('aria-pressed', on); });
     } else if (act === 'pm') {
-      S.ui.pm = b.dataset.m; save(); rerenderKeepScroll();
+      S.ui.pm = b.dataset.m; saveQuiet(); rerenderKeepScroll();
     } else if (act === 'wakelock') {
       toggleWake();
+    } else if (act === 'sync-connect') {
+      const err = $('#syncErr'); err.textContent = ''; b.disabled = true; b.textContent = 'Connecting…';
+      connectSync($('#syRepo').value, $('#syToken').value)
+        .then(() => { rerenderKeepScroll(); })
+        .catch((x) => { err.innerHTML = `<span class="sy sy-error">${esc(x.message)}</span>`; b.disabled = false; b.textContent = 'Connect'; });
+    } else if (act === 'sync-now') {
+      syncNow();
+    } else if (act === 'sync-off') {
+      if (confirm('Stop syncing on this device?\n\nYour data stays on this phone and in your GitHub repo. You can reconnect any time with a token.')) {
+        const repo = SY.repo; disconnectSync(); SY.lastRepo = repo; saveSync(); rerenderKeepScroll();
+      }
     } else if (act === 'pick-import') {
       $('#importFile').click();
     } else if (act === 'export') {
       doExport();
       if (parse().view === 'progress') rerenderKeepScroll();
     } else if (act === 'reset') {
-      if (confirm('Erase ALL ticks, weights, check-ins and history on this phone?\n\nExport a backup first if you might need it.')) { S = blank(); save(); route(); }
+      const msg = syncOn()
+        ? 'Erase ALL ticks, weights, check-ins and history on this phone AND in your cloud copy (all synced devices)?\n\nOld versions stay in your GitHub repo history, but export a backup first if you might need it.'
+        : 'Erase ALL ticks, weights, check-ins and history on this phone?\n\nExport a backup first if you might need it.';
+      if (confirm(msg)) { S = blank(); save(); route(); }
     }
   });
 
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && S.ui.wantWake && !wakeLock && 'wakeLock' in navigator) toggleWake();
+    if (document.visibilityState === 'visible') {
+      if (S.ui.wantWake && !wakeLock && 'wakeLock' in navigator) toggleWake();
+      if (syncOn() && (!SY.at || Date.now() - new Date(SY.at) > 20000)) syncNow(); // pick up changes from other devices
+    } else if (syncOn() && SY.dirty) {
+      lastPush = 0; syncNow(); // leaving the app: upload right away
+    }
   });
+  window.addEventListener('online', () => { if (syncOn()) syncNow(); });
 
   /* ---------------- offline support ---------------- */
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
@@ -1226,4 +1463,5 @@
 
   ensureSnaps();
   route();
+  if (syncOn()) { setSync(SY.err ? 'error' : 'ok', SY.err); syncNow(); }
 })();
