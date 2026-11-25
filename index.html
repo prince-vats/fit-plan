@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Hostel Fit Plan</title>
+  <meta name="description" content="6-day fat-loss diet and workout plan built around the hostel mess menu. Pure veg, plant protein, no cooking.">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#000000">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="assets/icon-192.png">
+  <link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#/">
+        <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 7v10M3 9.5v5M18 7v10M21 9.5v5M6 12h12"/></svg></span>
+        <span class="brand-txt"><b>Hostel Fit Plan</b><small>25 – 30 Nov · veg · no-cook</small></span>
+      </a>
+      <nav class="nav" aria-label="Sections">
+        <a href="#/" data-tab="plan">Plan</a>
+        <a href="#shop" data-tab="shop">Shopping</a>
+        <a href="#guide" data-tab="guide">Guide</a>
+        <a href="#progress" data-tab="progress">Progress</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="app" class="wrap"></main>
+
+  <footer class="foot wrap">
+    <div class="legend-row">
+      <span class="src s-mess">Mess</span> from hostel menu
+      <span class="src s-own">Own</span> bought from market
+      <span class="src s-mix">Mess + own</span> combined
+    </div>
+    <p>Estimates for typical mess portions · general fitness guidance, not medical advice.</p>
+  </footer>
+
+  <div id="timer" class="timer" hidden role="status" aria-live="polite">
+    <div class="t-bar"><i id="tBar"></i></div>
+    <div class="t-row">
+      <div class="t-main"><span id="tLabel">Rest</span><b id="tTime">0:00</b></div>
+      <div class="t-btns">
+        <button data-t="-15" aria-label="Remove 15 seconds">−15</button>
+        <button data-t="15" aria-label="Add 15 seconds">+15</button>
+        <button data-t="skip" class="t-skip">Skip</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="assets/data.js"></script>
+  <script src="assets/app.js"></script>
+</body>
+</html>
